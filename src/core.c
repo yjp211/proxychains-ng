@@ -42,6 +42,7 @@
 extern int tcp_read_time_out;
 extern int tcp_connect_time_out;
 extern int proxychains_quiet_mode;
+extern int proxychains_expose_local;
 extern unsigned int proxychains_proxy_offset;
 extern unsigned int remote_dns_subnet;
 
@@ -748,14 +749,16 @@ struct hostent *proxy_gethostbyname(const char *name, struct gethostbyname_data*
 	data->hostent_space.h_addrtype = AF_INET;
 	data->hostent_space.h_length = sizeof(in_addr_t);
 
-	gethostname(buff, sizeof(buff));
+    if(!proxychains_expose_local){
+	    gethostname(buff, sizeof(buff));
 
-	if(!strcmp(buff, name)) {
-		data->resolved_addr = inet_addr(buff);
-		if(data->resolved_addr == (in_addr_t) (-1))
-			data->resolved_addr = (in_addr_t) (ip_type_localhost.addr.v4.as_int);
-		goto retname;
-	}
+	    if(!strcmp(buff, name)) {
+		    data->resolved_addr = inet_addr(buff);
+		    if(data->resolved_addr == (in_addr_t) (-1))
+			    data->resolved_addr = (in_addr_t) (ip_type_localhost.addr.v4.as_int);
+		    goto retname;
+	    }
+    }
 
 	// this iterates over the "known hosts" db, usually /etc/hosts
 	ip_type4 hdb_res = hostsreader_get_numeric_ip_for_name(name);

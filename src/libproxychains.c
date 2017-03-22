@@ -64,6 +64,7 @@ int proxychains_got_chain_data = 0;
 unsigned int proxychains_max_chain = 1;
 int proxychains_quiet_mode = 0;
 int proxychains_resolver = 0;
+int proxychains_expose_local = 0;
 localaddr_arg localnet_addr[MAX_LOCALNET];
 size_t num_localnet_addr = 0;
 unsigned int remote_dns_subnet = 224;
@@ -295,6 +296,8 @@ static void get_chain_data(proxy_data * pd, unsigned int *proxy_count, chain_typ
 					proxychains_quiet_mode = 1;
 				} else if(strstr(buff, "proxy_dns")) {
 					proxychains_resolver = 1;
+				} else if(strstr(buff, "expose_local")) {
+					proxychains_expose_local = 1;
 				}
 			}
 		}
