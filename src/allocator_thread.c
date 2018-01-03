@@ -1,3 +1,9 @@
+#undef _GNU_SOURCE
+#define _GNU_SOURCE
+#undef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#define _DARWIN_C_SOURCE
+#include <limits.h>
 #include <pthread.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -9,6 +15,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <errno.h>
+#include <sys/mman.h>
 #include "allocator_thread.h"
 #include "debug.h"
 #include "ip_type.h"
@@ -34,9 +41,8 @@ static void *dumpstring(char* s, size_t len) {
 	return p;
 }
 
-pthread_mutex_t internal_ips_lock;
-internal_ip_lookup_table *internal_ips = NULL;
-internal_ip_lookup_table internal_ips_buf;
+static pthread_mutex_t *internal_ips_lock;
+static internal_ip_lookup_table *internal_ips;
 
 uint32_t index_from_internal_ip(ip_type4 internalip) {
 	PFUNC();
@@ -151,7 +157,6 @@ struct at_msghdr {
 };
 
 static pthread_t allocator_thread;
-static pthread_attr_t allocator_thread_attr;
 int req_pipefd[2];
 int resp_pipefd[2];
 
@@ -176,24 +181,61 @@ static int wait_data(int readfd) {
 	return 1;
 }
 
+static int trywrite(int fd, void* buf, size_t bytes) {
+	ssize_t ret;
+	unsigned char *out = buf;
+again:
+	ret = write(fd, out, bytes);
+	switch(ret) {
+		case -1:
+			if(errno == EINTR) goto again;
+		case  0:
+			return 0;
+		default:
+			if(ret == bytes || !bytes) return 1;
+			out += ret;
+			bytes -= ret;
+			goto again;
+	}
+}
+
 static int sendmessage(enum at_direction dir, struct at_msghdr *hdr, void* data) {
 	static int* destfd[ATD_MAX] = { [ATD_SERVER] = &req_pipefd[1], [ATD_CLIENT] = &resp_pipefd[1] };
-	int ret = write(*destfd[dir], hdr, sizeof *hdr) == sizeof *hdr;
+	int ret = trywrite(*destfd[dir], hdr, sizeof *hdr);
 	if(ret && hdr->datalen) {
 		assert(hdr->datalen <= MSG_LEN_MAX);
-		ret = write(*destfd[dir], data, hdr->datalen) == hdr->datalen;
+		ret = trywrite(*destfd[dir], data, hdr->datalen);
 	}
 	return ret;
 }
 
+static int tryread(int fd, void* buf, size_t bytes) {
+	ssize_t ret;
+	unsigned char *out = buf;
+again:
+	ret = read(fd, out, bytes);
+	switch(ret) {
+		case -1:
+			if(errno == EINTR) goto again;
+		case  0:
+			return 0;
+		default:
+			if(ret == bytes || !bytes) return 1;
+			out += ret;
+			bytes -= ret;
+			goto again;
+	}
+}
+
 static int getmessage(enum at_direction dir, struct at_msghdr *hdr, void* data) {
 	static int* readfd[ATD_MAX] = { [ATD_SERVER] = &req_pipefd[0], [ATD_CLIENT] = &resp_pipefd[0] };
-	int ret;
+	ssize_t ret;
 	if((ret = wait_data(*readfd[dir]))) {
-		ret = read(*readfd[dir], hdr, sizeof *hdr) == sizeof(*hdr);
+		if(!tryread(*readfd[dir], hdr, sizeof *hdr))
+			return 0;
 		assert(hdr->datalen <= MSG_LEN_MAX);
-		if(ret && hdr->datalen) {
-			ret = read(*readfd[dir], data, hdr->datalen) == hdr->datalen;
+		if(hdr->datalen) {
+			ret = tryread(*readfd[dir], data, hdr->datalen);
 		}
 	}
 	return ret;
@@ -239,7 +281,7 @@ static void* threadfunc(void* x) {
 
 ip_type4 at_get_ip_for_host(char* host, size_t len) {
 	ip_type4 readbuf;
-	MUTEX_LOCK(&internal_ips_lock);
+	MUTEX_LOCK(internal_ips_lock);
 	if(len > MSG_LEN_MAX) goto inv;
 	struct at_msghdr msg = {.msgtype = ATM_GETIP, .datalen = len + 1 };
 	if(sendmessage(ATD_SERVER, &msg, host) &&
@@ -248,19 +290,21 @@ ip_type4 at_get_ip_for_host(char* host, size_t len) {
 		inv:
 		readbuf = ip_type_invalid.addr.v4;
 	}
-	MUTEX_UNLOCK(&internal_ips_lock);
+	assert(msg.msgtype == ATM_GETIP);
+	MUTEX_UNLOCK(internal_ips_lock);
 	return readbuf;
 }
 
 size_t at_get_host_for_ip(ip_type4 ip, char* readbuf) {
 	struct at_msghdr msg = {.msgtype = ATM_GETNAME, .datalen = sizeof(ip_type4) };
 	size_t res = 0;
-	MUTEX_LOCK(&internal_ips_lock);
+	MUTEX_LOCK(internal_ips_lock);
 	if(sendmessage(ATD_SERVER, &msg, &ip) && getmessage(ATD_CLIENT, &msg, readbuf)) {
 		if((ptrdiff_t) msg.datalen <= 0) res = 0;
 		else res = msg.datalen - 1;
 	}
-	MUTEX_UNLOCK(&internal_ips_lock);
+	assert(msg.msgtype == ATM_GETNAME);
+	MUTEX_UNLOCK(internal_ips_lock);
 	return res;
 }
 
@@ -272,18 +316,33 @@ static void initpipe(int* fds) {
 	}
 }
 
+#ifndef MAX
+#define MAX(x, y) ((x) > (y) ? (x) : (y))
+#endif
+
+#if !defined(PTHREAD_STACK_MIN) || defined(__APPLE__)
+/* MAC says its min is 8KB, but then crashes in our face. thx hunkOLard */
+#define PTHREAD_STACK_MIN 64*1024
+#endif
+
 /* initialize with pointers to shared memory. these will
  * be used to place responses and arguments */
 void at_init(void) {
 	PFUNC();
-	MUTEX_INIT(&internal_ips_lock);
-	internal_ips = &internal_ips_buf;
+	void *shm = mmap(0, 4096, PROT_WRITE|PROT_READ, MAP_ANON|MAP_SHARED, -1, 0);
+	assert(shm);
+	internal_ips_lock = shm;
+	internal_ips = (void*)((char*)shm + 2048);
+
+	MUTEX_INIT(internal_ips_lock);
 	memset(internal_ips, 0, sizeof *internal_ips);
 	initpipe(req_pipefd);
 	initpipe(resp_pipefd);
+	pthread_attr_t allocator_thread_attr;
 	pthread_attr_init(&allocator_thread_attr);
-	pthread_attr_setstacksize(&allocator_thread_attr, 16 * 1024);
+	pthread_attr_setstacksize(&allocator_thread_attr, MAX(16 * 1024, PTHREAD_STACK_MIN));
 	pthread_create(&allocator_thread, &allocator_thread_attr, threadfunc, 0);
+	pthread_attr_destroy(&allocator_thread_attr);
 }
 
 void at_close(void) {
@@ -295,6 +354,5 @@ void at_close(void) {
 	close(req_pipefd[1]);
 	close(resp_pipefd[0]);
 	close(resp_pipefd[1]);
-	pthread_attr_destroy(&allocator_thread_attr);
-	MUTEX_DESTROY(&internal_ips_lock);
+	MUTEX_DESTROY(internal_ips_lock);
 }
