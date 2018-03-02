@@ -351,8 +351,8 @@ static int tunnel_to(int sock, ip_type ip, unsigned short port, proxy_type pt, c
 
 				if(2 != read_n_bytes(sock, in, 2))
 					goto err;
-				if(in[0] != 1 || in[1] != 0) {
-					if(in[0] != 1)
+				if(in[0] != 5 || in[1] != 0) {
+					if(in[0] != 5)
 						goto err;
 					else
 						return BLOCKED;
@@ -790,8 +790,8 @@ void proxy_freeaddrinfo(struct addrinfo *res) {
 	free(res);
 }
 
-#if defined(IS_MAC) || defined(IS_OPENBSD)
-#ifdef IS_OPENBSD /* OpenBSD has its own incompatible getservbyname_r */
+#if defined(IS_MAC) || defined(IS_OPENBSD) || defined(IS_SOLARIS)
+#if defined(IS_OPENBSD) || defined(IS_SOLARIS) /* OpenBSD and Solaris has its own incompatible getservbyname_r */
 #define getservbyname_r mygetservbyname_r
 #endif
 /* getservbyname on mac is using thread local storage, so we dont need mutex 

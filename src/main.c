@@ -8,9 +8,9 @@
  ***************************************************************************/
 
 #undef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
+#define _POSIX_C_SOURCE 200112L
 #undef _XOPEN_SOURCE
-#define _XOPEN_SOURCE 700
+#define _XOPEN_SOURCE 600
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -71,6 +71,9 @@ int main(int argc, char *argv[]) {
 	int quiet = 0;
 	size_t i;
 	const char *prefix = NULL;
+
+	if(argc == 2 && !strcmp(argv[1], "--help"))
+		return usage(argv);
 
 	for(i = 0; i < MAX_COMMANDLINE_FLAGS; i++) {
 		if(start_argv < argc && argv[start_argv][0] == '-') {
